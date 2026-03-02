@@ -18,7 +18,7 @@ For each <path> element:
 """
 
 import math
-import re
+import re as _re
 
 import numpy as np
 from lxml import etree
@@ -147,7 +147,7 @@ def _sample_path_dense(d: str) -> list[tuple[float, float]]:
 
 
 def _is_closed_path(d: str) -> bool:
-    return bool(re.search(r"[Zz]\s*$", d.strip()))
+    return bool(_re.search(r"[Zz]\s*$", d.strip()))
 
 
 def _path_to_shapely(d: str):
@@ -236,6 +236,38 @@ def _get_style(el) -> dict[str, str]:
     return {a: el.get(a) for a in _STYLE_ATTRS if el.get(a) is not None}
 
 
+def _style_no_fill(style: dict[str, str]) -> dict[str, str]:
+    """
+    Return a copy of *style* with fill forced to none.
+
+    Handles both the `fill` presentation attribute and any `fill:…`
+    declaration embedded inside the `style` CSS string.
+    """
+    out = dict(style)
+    # Strip fill from inline CSS string
+    if "style" in out:
+        css = _re.sub(r'\bfill\s*:[^;]+;?', '', out["style"]).strip().rstrip(';')
+        if css:
+            out["style"] = css
+        else:
+            del out["style"]
+    # Always set fill=none as a presentation attribute
+    out["fill"] = "none"
+    return out
+
+
+def _apply_no_fill(el) -> None:
+    """Force fill=none on a live lxml element, stripping any CSS fill too."""
+    el.set("fill", "none")
+    css = el.get("style")
+    if css:
+        css = _re.sub(r'\bfill\s*:[^;]+;?', '', css).strip().rstrip(';')
+        if css:
+            el.set("style", css)
+        else:
+            del el.attrib["style"]
+
+
 def _make_path_el(d: str, style: dict[str, str]) -> "etree._Element":
     el = etree.Element(f"{SVGP}path")
     el.set("d", d)
@@ -279,9 +311,9 @@ def fix_symmetry(
         if parent is None:
             continue
 
-        d     = el.get("d", "").strip()
-        style = _get_style(el)
-        side  = _path_side(d, cx, cy, theta)
+        d      = el.get("d", "").strip()
+        style  = _style_no_fill(_get_style(el))
+        side   = _path_side(d, cx, cy, theta)
 
         # ── Path is entirely on the opposite side → discard ───────────────
         if side == opp:
@@ -290,13 +322,13 @@ def fix_symmetry(
 
         # ── Path is entirely on the kept side → keep verbatim + add mirror ──
         if side in (keep_side, "zero"):
+            _apply_no_fill(el)          # strip any fill from the original too
             mirror_d = _reflect_d_exact(d, cx, cy, theta)
             if mirror_d:
                 idx = list(parent).index(el)
                 mirror_el = _make_path_el(mirror_d, style)
                 mirror_el.tail = el.tail
                 parent.insert(idx + 1, mirror_el)
-            # Original path stays untouched
             continue
 
         # ── Path crosses the axis → Shapely clip + reflect + union ────────
